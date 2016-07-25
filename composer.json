@@ -1,0 +1,7 @@
+{
+    "name":"lzx/phser",
+    "require": {
+        "adoy/fastcgi-client": "~1.0"
+    }
+}
+

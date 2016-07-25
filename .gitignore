@@ -1,0 +1,6 @@
+.htaccess
+.buildpath
+.project
+.settings
+/vendor
+.idea/
