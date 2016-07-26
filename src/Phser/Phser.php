@@ -14,6 +14,8 @@ class Phser
         set_time_limit(0);
 
         $this->_config = (new ParseIni('./config/config.ini'))->parse_ini_file();
+
+        echo "<pre>";print_r($this->_config);exit;
     }
 
     public function createSocket()
