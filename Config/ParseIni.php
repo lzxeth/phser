@@ -1,5 +1,5 @@
 <?php
-namespace Phser\Config;
+namespace Phweb\Config;
 
 class ParseIni
 {

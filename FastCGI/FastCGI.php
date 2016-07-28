@@ -1,10 +1,8 @@
 <?php
 
-namespace Phser\FastCgi;
+namespace Phweb\FastCGI;
 
-use Adoy\FastCGI\Client;
-
-class FastCgi
+class FastCGI
 {
     /**
      * @var Client
@@ -17,15 +15,15 @@ class FastCgi
     protected $host;
 
     /**
-     * @param string $host 127.0.0.1:9000 or /var/run/php5-fpm.sock
+     * @param string $host 127.0.0.1:9000 or /var/doRun/php5-fpm.sock
      * @param string $tempDir
      */
     public function __construct($host = null, $tempDir = null)
     {
         // try to guess where it is
         if ($host === null) {
-            if (file_exists('/var/run/php5-fpm.sock')) {
-                $host = '/var/run/php5-fpm.sock';
+            if (file_exists('/var/doRun/php5-fpm.sock')) {
+                $host = '/var/doRun/php5-fpm.sock';
             } else {
                 $host = '127.0.0.1:9000';
             }
@@ -49,45 +47,31 @@ class FastCgi
     /**
      * {@inheritdoc}
      */
-    protected function doRun(Code $code)
+    public function run($environment, $stdin)
     {
-        $response = $this->request($code);
+        $response = $this->request($environment, $stdin);
+
         $parts = explode("\r\n\r\n", $response);
 
         // remove headers
-        array_shift($parts);
+        $header = array_shift($parts);
         $body = implode("\r\n\r\n", $parts);
-
-        if (@unserialize($body) === false) {
-            throw new \RuntimeException(sprintf("Error: %s", $response));
-        }
 
         return $body;
     }
 
-    protected function request(Code $code)
+    protected function request($environment, $stdin)
     {
-        $file = $this->createTemporaryFile();
-
-        $this->logger->info(sprintf('FastCGI: Dumped code to file: %s', $file));
+        //$this->logger->info(sprintf('FastCGI: Dumped code to file: %s', $file));
 
         try {
-            $code->writeTo($file);
 
-            $environment = array(
-                'REQUEST_METHOD'  => 'POST',
-                'REQUEST_URI'     => '/',
-                'SCRIPT_FILENAME' => $file,
-            );
 
-            $response = $this->client->request($environment, '');
-            $this->logger->debug(sprintf('FastCGI: Response: %s', json_encode($response)));
+            $response = $this->client->request($environment, $stdin);
+            //$this->logger->debug(sprintf('FastCGI: Response: %s', json_encode($response)));
 
-            @unlink($file);
             return $response;
         } catch (\Exception $e) {
-            @unlink($file);
-
             throw new \RuntimeException(
                 sprintf('FastCGI error: %s (%s)', $e->getMessage(), $this->host),
                 $e->getCode(),
