@@ -1,21 +1,17 @@
 <?php
 
-class DaemonCommand
+class Daemon
 {
-
-    private $info_dir = "/tmp";
+    private $run_pid_dir = "/tmp";
     private $pid_file = "";
     private $terminate = false; //是否中断
     private $workers_count = 0;
-    private $gc_enabled = null;
     private $workers_max = 8; //最多运行8个进程
 
-    public function __construct($is_sington = false, $user = 'nobody', $output = "/dev/null")
+    public function __construct($user = 'nobody', $output = "/dev/null")
     {
-
-        $this->is_sington = $is_sington; //是否单例运行，单例运行会在tmp目录下建立一个唯一的PID
-        $this->user       = $user;//设置运行的用户 默认情况下nobody
-        $this->output     = $output; //设置输出的地方
+        $this->user   = $user;//设置运行的用户 默认情况下nobody
+        $this->output = $output; //设置输出的地方
         $this->checkPcntl();
     }
 
@@ -23,38 +19,28 @@ class DaemonCommand
     public function checkPcntl()
     {
         if (!function_exists('pcntl_signal_dispatch')) {
-            // PHP < 5.3 uses ticks to handle signals instead of pcntl_signal_dispatch
-            // call sighandler only every 10 ticks
             declare(ticks = 10);
         }
 
-        // Make sure PHP has support for pcntl
         if (!function_exists('pcntl_signal')) {
-            $message = 'PHP does not appear to be compiled with the PCNTL extension.  ' .
-                'This is neccesary for daemonization';
+            $message = 'pcntl ext is necessary.';
             $this->_log($message);
             throw new Exception($message);
         }
-        //信号处理
+
         /**
-         * 第三个参数指定当信号到达时系统调用重启是否可用。（译注：经查资料，此参数意为系统调用被信号打断时，系统调用是否从 开始处重新开始，
-         * 但根据http://bugs.php.net/bug.php?id=52121，此参数存在bug无效。）
+         * 第三个参数指定当信号到达时系统调用重启是否可用。
+         * (译注：经查资料，此参数意为系统调用被信号打断时，系统调用是否从开始处重新开始，
+         * 但根据http://bugs.php.net/bug.php?id=52121，此参数存在bug无效。)
          */
         pcntl_signal(SIGTERM, array(__CLASS__, "signalHandler"), false);
         pcntl_signal(SIGINT, array(__CLASS__, "signalHandler"), false);
         pcntl_signal(SIGQUIT, array(__CLASS__, "signalHandler"), false);
-
-        // Enable PHP 5.3 garbage collection
-        if (function_exists('gc_enable')) {
-            gc_enable(); // 激活循环引用收集器
-            $this->gc_enabled = gc_enabled();
-        }
     }
 
     // daemon化程序
     public function daemonize()
     {
-
         global $stdin, $stdout, $stderr;
         global $argv;
 
@@ -65,12 +51,9 @@ class DaemonCommand
             die("only run in command line mode\n");
         }
 
-        // 只能单例运行
-        if ($this->is_sington == true) {
-
-            $this->pid_file = $this->info_dir."/".__CLASS__."_".substr(basename($argv[0]), 0, -4).".pid";
-            $this->checkPidfile();
-        }
+        // 检查是否已经启动
+        $this->pid_file = $this->run_pid_dir."/".__CLASS__."_".substr(basename($argv[0]), 0, -4).".pid";
+        $this->checkPidfile();
 
         umask(0); //把文件掩码清0
 
@@ -97,41 +80,45 @@ class DaemonCommand
         $stdout = fopen($this->output, 'a');
         $stderr = fopen($this->output, 'a');
 
-        if ($this->is_sington == true) {
-            $this->createPidfile();
-        }
-
+        //生成pid文件
+        $this->createPidfile();
     }
 
-    //--检测pid是否已经存在
+
+    /**
+     * 检测pidfile是否存在
+     *
+     * @return bool
+     */
     public function checkPidfile()
     {
-
         if (!file_exists($this->pid_file)) {
             return true;
         }
         $pid = file_get_contents($this->pid_file);
         $pid = intval($pid);
+
+        //posix_kill 0 代表向pid发送空信号，使用这个方法对某个进程的存在性进行检查，而不会真的发送信号。
         if ($pid > 0 && posix_kill($pid, 0)) {
             $this->_log("the daemon process is already started");
         } else {
             $this->_log("the daemon proces end abnormally, please check pidfile ".$this->pid_file);
         }
         exit(1);
-
     }
 
-    //----创建pid
+    /**
+     *创建pid文件
+     */
     public function createPidfile()
     {
-
-        if (!is_dir($this->info_dir)) {
-            mkdir($this->info_dir);
+        if (!is_dir($this->run_pid_dir)) {
+            mkdir($this->run_pid_dir);
         }
-        $fp = fopen($this->pid_file, 'w') or die("cannot create pid file");
+        $fp = fopen($this->pid_file, 'w') or die("cannot listen pid file");
         fwrite($fp, posix_getpid());
         fclose($fp);
-        $this->_log("create pid file ".$this->pid_file);
+        $this->_log("listen pid file ".$this->pid_file);
     }
 
     //设置运行的用户
@@ -154,12 +141,15 @@ class DaemonCommand
 
     }
 
+    public function setRunPidDir($path)
+    {
+        $this->run_pid_dir = $path;
+    }
+
     //信号处理函数
     public function signalHandler($signo)
     {
-
         switch ($signo) {
-
             //用户自定义信号
             case SIGUSR1: //busy
                 if ($this->workers_count < $this->workers_max) {
@@ -179,76 +169,57 @@ class DaemonCommand
             case SIGTERM:
             case SIGHUP:
             case SIGQUIT:
-
                 $this->terminate = true;
                 break;
             default:
                 return false;
         }
-
     }
 
     /**
-     *开始开启进程
-     *$count 准备开启的进程数
+     * 开始开启进程
+     *
+     * $count 准备开启的进程数
      */
     public function start($count = 1)
     {
-
         $this->_log("daemon process is running now");
-        pcntl_signal(SIGCHLD, array(__CLASS__, "signalHandler"), false); // if worker die, minus children num
+
+        //接收子进程退出信号
+        pcntl_signal(SIGCHLD, array(__CLASS__, "signalHandler"), false);
+
         while (true) {
             if (function_exists('pcntl_signal_dispatch')) {
-
                 pcntl_signal_dispatch();
             }
 
             if ($this->terminate) {
                 break;
             }
-            $pid = -1;
-            if ($this->workers_count < $count) {
 
+            if ($this->workers_count < $count) {
                 $pid = pcntl_fork();
             }
 
             if ($pid > 0) {
-
                 $this->workers_count++;
-
-            } elseif ($pid == 0) {
-
+            } else {
                 // 这个符号表示恢复系统对信号的默认处理
                 pcntl_signal(SIGTERM, SIG_DFL);
                 pcntl_signal(SIGCHLD, SIG_DFL);
                 if (!empty($this->jobs)) {
-                    while ($this->jobs['runtime']) {
-                        if (empty($this->jobs['argv'])) {
-                            call_user_func($this->jobs['function'], $this->jobs['argv']);
-                        } else {
-                            call_user_func($this->jobs['function']);
-                        }
-                        $this->jobs['runtime']--;
-                        sleep(2);
-                    }
-                    exit();
-
+                    call_user_func($this->jobs);
                 }
-
-                return;
-
-            } else {
-
-                sleep(2);
+                exit();
             }
 
-
+            return;
         }
 
         $this->mainQuit();
         exit(0);
-
     }
+
 
     //整个进程退出
     public function mainQuit()
@@ -263,28 +234,14 @@ class DaemonCommand
         exit(0);
     }
 
-    // 添加工作实例，目前只支持单个job工作
-    public function setJobs($jobs = array())
+    /**
+     * 设置任务
+     *
+     * @param array $jobs
+     */
+    public function setJobs(array $jobs)
     {
-
-        if (!isset($jobs['argv']) || empty($jobs['argv'])) {
-
-            $jobs['argv'] = "";
-
-        }
-        if (!isset($jobs['runtime']) || empty($jobs['runtime'])) {
-
-            $jobs['runtime'] = 1;
-
-        }
-
-        if (!isset($jobs['function']) || empty($jobs['function'])) {
-
-            $this->log("你必须添加运行的函数！");
-        }
-
         $this->jobs = $jobs;
-
     }
 
     //日志处理
@@ -292,26 +249,10 @@ class DaemonCommand
     {
         printf("%s\t%d\t%d\t%s\n", date("c"), posix_getpid(), posix_getppid(), $message);
     }
-
 }
 
-//调用方法1
-/*$daemon = new DaemonCommand(true);
+$daemon = new Daemon(true, 'nobody', '/data0/www/phweb/daemon.log');
 $daemon->daemonize();
-$daemon->start(2);//开启2个子进程工作
-work();*/
+$daemon->start(1);//开启1个子进程工作
 
-
-//调用方法2
-$daemon = new DaemonCommand(true);
-$daemon->daemonize();
-//function 要运行的函数,argv运行函数的参数，runtime运行的次数
-$daemon->setJobs(array('function' => 'work', 'argv' => '', 'runtime' => 1000));
-$daemon->start(2);//开启2个子进程工作
-
-//具体功能的实现
-function work()
-{
-    echo "测试1";
-}
 

@@ -30,6 +30,8 @@ class Loader
             'Phweb\Config\ParseIni' => '/data0/www/phweb/Config/ParseIni.php',
             'Phweb\FastCGI\Client'  => '/data0/www/phweb/FastCGI/Client.php',
             'Phweb\FastCGI\FastCGI' => '/data0/www/phweb/FastCGI/FastCGI.php',
+            'Phweb\Socket\Daemon' => '/data0/www/phweb/Socket/Daemon.php',
+            'Phweb\Socket\Socket' => '/data0/www/phweb/Socket/Socket.php',
         );
     }
 }

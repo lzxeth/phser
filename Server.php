@@ -4,10 +4,13 @@ namespace Phweb;
 
 use Phweb\Config\ParseIni;
 use Phweb\FastCGI\FastCGI;
+use Phweb\Socket\Daemon;
+use Phweb\Socket\Socket;
 
-class Phser
+class Server
 {
     private $_config;
+    private $_sock;
 
     /* request environment */
     private $_method;
@@ -39,68 +42,42 @@ class Phser
         //确保在连接客户端时不会超时
         set_time_limit(0);
 
+        //配置文件
         $parseObj = new ParseIni('./Config/config.ini');
-
         $this->_config = $parseObj->parseConfig();
+
+        //socket
+        $this->_sock = new Socket($this->_config['address'], $this->_config['port']);
     }
 
     public function createSocket()
     {
-        /**
-         * 创建一个SOCKET
-         * AF_INET=是ipv4 如果用ipv6，则参数为 AF_INET6
-         * SOCK_STREAM为socket的tcp类型，如果是UDP则使用SOCK_DGRAM
-         */
-        if (!($sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP))) {
-            throw new \RuntimeException("socket_create err:".socket_strerror(socket_last_error()));
-        }
-
-        ////在修改源码后重启启动总是提示bind: Address already in use,使用tcpreuse解决
-        if (!socket_set_option($sock, SOL_SOCKET, SO_REUSEADDR, 1)) {
-            throw new \RuntimeException("socket_set_option err:".socket_strerror(socket_last_error()));
-        }
-
-        //阻塞模式
-        if (!socket_set_block($sock)) {
-            throw new \RuntimeException("socket_set_block err:".socket_strerror(socket_last_error()));
-        }
-
-        //绑定到socket端口
-        if (!socket_bind($sock, $this->_config['address'], $this->_config['port'])) {
-            throw new \RuntimeException("socket_bind err:".socket_strerror(socket_last_error()));
-        }
-
-        //开始监听
-        if (!socket_listen($sock, 5)) {
-            throw new \RuntimeException("socket_listen err:".socket_strerror(socket_last_error()));
-        }
+        /* 监听 */
+        $this->_sock->listen();
 
         do {
-            // never stop the daemon
-            //它接收连接请求并调用一个子连接Socket来处理客户端和服务器间的信息
-            if (!($connfd = socket_accept($sock))) {
-                throw new \RuntimeException("socket_accept err:".socket_strerror(socket_last_error()));
-            }
+            /* 连接 */
+            $this->_sock->accept();
 
             //处理请求
-            $this->acceptRequest($connfd);
+            $this->acceptRequest();
         } while (true);
 
-        socket_close($sock);
+        $this->_sock->closeListenFD();
     }
 
-    public function acceptRequest($connfd)
+    public function acceptRequest()
     {
         /* 根据请求状态行解析出method,query_string,filename */
-        $this->parseQueryStatusLine($connfd);
+        $this->parseQueryStatusLine();
         
         /* 只支持GET和POST方法 */
         if ($this->_method !== self::METHOD_POST && $this->_method !== self::METHOD_GET) {
-            return $this->unImplemented($connfd);
+            return $this->unImplemented();
         }
 
         /* 解析缓冲区剩余数据,GET就丢弃header头,POST则解析请求体 */
-        $this->parseQueryEntity($connfd);
+        $this->parseQueryEntity();
 
         /* 判断是否是cgi请求 */
         if ($this->isCgi()) {
@@ -108,45 +85,27 @@ class Phser
             $file = $this->getDynamicFileName();
             $fileInfo = new \SplFileInfo($file);
             if (!$fileInfo->isFile() || !$fileInfo->isExecutable()) {
-                return $this->notFound($connfd);
+                return $this->notFound();
             }
 
             $fastCgi = new FastCGI();
-
-            //构造fast-cgi请求
-            $environment = array(
-                'GATEWAY_INTERFACE' => 'FastCGI/1.0',
-                'REQUEST_METHOD'  => $this->_method,
-                'SCRIPT_FILENAME' => $file,
-                'SERVER_SOFTWARE'   => 'php/fcgiclient',
-                'REMOTE_ADDR'       => '127.0.0.1',
-                'REMOTE_PORT'       => '9985',
-                'SERVER_ADDR'       => '127.0.0.1',
-                'SERVER_PORT'       => '80',
-                'SERVER_NAME'       => self::RESP_SERVER,
-                'SERVER_PROTOCOL'   => 'HTTP/1.1',
-                'REQUEST_URI'     => $this->_requestUri,
-                'QUERY_STRING'    => $this->_queryString,
-                'CONTENT_TYPE'    => $this->_contentType,
-                'CONTENT_LENGTH'    => $this->_contentLength,
-            );
-
+            $environment = $this->getEnvForFastCGI($file);
             $fastCgiResp = $fastCgi->run($environment, $this->_queryEntity);
 
             /* resp data */
-            $this->respData($connfd, $fastCgiResp);
+            $this->respData($fastCgiResp);
         } else {
             /* 判断请求的文件是否可读 */
             $file = $this->getStaticFileName();
             $fileInfo = new \SplFileInfo($file);
             if (!$fileInfo->isFile() || !$fileInfo->isReadable()) {
-                return $this->notFound($connfd);
+                return $this->notFound();
             }
 
-            $this->cat($connfd, $file);
+            $this->cat($file);
         }
 
-        socket_close($connfd);
+        $this->_sock->closeConnectFD();
     }
 
     /**
@@ -182,9 +141,9 @@ class Phser
      *
      * @param $connfd
      */
-    public function parseQueryStatusLine($connfd)
+    public function parseQueryStatusLine()
     {
-        $line = $this->getLine($connfd);
+        $line = $this->_sock->readLine();
 
         $statusLineArr = explode(' ', trim($line));
         if (!is_array($statusLineArr) || count($statusLineArr) !== 3) {
@@ -202,15 +161,15 @@ class Phser
         }
     }
 
-    public function parseQueryEntity($connfd)
+    public function parseQueryEntity()
     {
         if ($this->_method == self::METHOD_GET) {
             do {
-                $line = $this->getLine($connfd);
+                $line = $this->_sock->readLine();
             } while (!empty($line)); // \r\n返回空
         } else {
             do {
-                $line = $this->getLine($connfd);
+                $line = $this->_sock->readLine();
                 if (strpos($line, 'Content-Length:') !== false) {
                     $this->_contentLength = intval(trim(str_replace('Content-Length:', '', $line)));
                 }
@@ -225,31 +184,40 @@ class Phser
             }
 
             /* 读取消息体 */
-            $this->_queryEntity = socket_read($connfd, $this->_contentLength);
+            $this->_queryEntity = $this->_sock->read($this->_contentLength);
         }
     }
 
     /**
-     * 从socket中读取一行数据
+     * fastcgi请求需要的环境变量
      *
-     * @param $connfd
-     * @return string
+     * @param $file
+     * @return array
      */
-    public function getLine($connfd)
+    public function getEnvForFastCGI($file)
     {
-        /* PHP_NORMAL_READ碰到\r,\n,\0就停止 */
-        $buf = trim(socket_read($connfd, 1024, PHP_NORMAL_READ)); //trim去掉末尾的\r
-
-        /* 读取\n */
-        socket_read($connfd, 1);
-
-        return $buf;
+        return array(
+            'GATEWAY_INTERFACE' => 'FastCGI/1.0',
+            'REQUEST_METHOD'  => $this->_method,
+            'SCRIPT_FILENAME' => $file,
+            'SERVER_SOFTWARE'   => 'php/fcgiclient',
+            'REMOTE_ADDR'       => '127.0.0.1',
+            'REMOTE_PORT'       => '9985',
+            'SERVER_ADDR'       => '127.0.0.1',
+            'SERVER_PORT'       => '80',
+            'SERVER_NAME'       => self::RESP_SERVER,
+            'SERVER_PROTOCOL'   => 'HTTP/1.1',
+            'REQUEST_URI'     => $this->_requestUri,
+            'QUERY_STRING'    => $this->_queryString,
+            'CONTENT_TYPE'    => $this->_contentType,
+            'CONTENT_LENGTH'    => $this->_contentLength,
+        );
     }
 
-    public function unImplemented($connfd)
+    public function unImplemented()
     {
         //读取全部数据
-        socket_read($connfd, 8192);
+        $this->_sock->read(8192);
 
         $response = "HTTP/1.1 501 Method Not Implemented\r\n";
         $response .= self::RESP_SERVER;
@@ -258,48 +226,38 @@ class Phser
         $response .= "<HTML><HEAD><TITLE>Method Not Implemented\r\n</TITLE></HEAD>\r\n";
         $response .= "<BODY><P>HTTP request method not supported.\r\n</P></BODY></HTML>\r\n";
 
-        if (!socket_write($connfd, $response, strlen($response))) {
-            throw new \RuntimeException("socket_write err:".socket_strerror(socket_last_error()));
-        }
-
-        socket_close($connfd);
+        $this->_sock->write($response);
+        $this->_sock->closeConnectFD();
     }
 
-    public function respData($connfd, $resp)
+    public function respData($resp)
     {
-        $this->headers($connfd);
-
-        if (!socket_write($connfd, $resp, strlen($resp))) {
-            throw new \RuntimeException("socket_write err:".socket_strerror(socket_last_error()));
-        }
+        $this->headers();
+        $this->_sock->write($resp);
     }
 
-    public function cat($connfd, $file)
+    public function cat($file)
     {
-        $this->headers($connfd);
+        $this->headers();
 
         $fileObj = new \SplFileObject($file, "r");
         while (!$fileObj->eof()) {
             $line = $fileObj->fgets();
-            if (!socket_write($connfd, $line, strlen($line))) {
-                throw new \RuntimeException("socket_write err:".socket_strerror(socket_last_error()));
-            }
+            $this->_sock->write($line);
         }
     }
 
-    public function headers($connfd)
+    public function headers()
     {
         $response = "HTTP/1.1 200 OK\r\n";
         $response .= self::RESP_SERVER;
         $response .= $this->isCgi() ? self::RESP_CGI_CONTENT_TYPE : self::RESP_CONTENT_TYPE;
         $response .= "\r\n";
 
-        if (!socket_write($connfd, $response, strlen($response))) {
-            throw new \RuntimeException("socket_write err:".socket_strerror(socket_last_error()));
-        }
+        $this->_sock->write($response);
     }
 
-    public function notFound($connfd)
+    public function notFound()
     {
         $response = "HTTP/1.1 404 NOT FOUND\r\n";
         $response .= self::RESP_SERVER;
@@ -311,18 +269,17 @@ class Phser
         $response .= "is unavailable or nonexistent.\r\n";
         $response .= "</BODY></HTML>\r\n";
 
-        if (!socket_write($connfd, $response, strlen($response))) {
-            throw new \RuntimeException("socket_write err:".socket_strerror(socket_last_error()));
-        }
-
-        socket_close($connfd);
+        $this->_sock->write($response);
+        $this->_sock->closeConnectFD();
     }
 }
 
-$d = new Phser();
-
 try{
-    $d->createSocket();
+    $server = new Server();
+    $d = new Daemon('nobody', '/data0/www/phweb/daemon.log');
+    $d->daemonize();
+    $d->setJobs([$server, 'createSocket']);
+    $d->start(2);
 }catch (\Exception $e){
     echo $e->getFile().':'.$e->getLine().':'.$e->getMessage();
 }
